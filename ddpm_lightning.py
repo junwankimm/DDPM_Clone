@@ -17,11 +17,11 @@ import torchvision
 import pytorch_lightning as pl
 import matplotlib.pyplot as plt
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelSummary
 
 from torchvision import transforms
 from torch.utils.data import DataLoader
 
-from lightning.pytorch.callbacks import ModelSummary
 import torch.nn.functional as F
 import torch.nn as nn
 from einops import rearrange 
@@ -47,8 +47,8 @@ def load_dataset():
         transforms.Lambda(lambda t: (t * 2) -1) # Tensor가 0~1 사이 값을 가지는데, -1 ~ 1로 확장해줌
     ])
     
-    train_dataset = torchvision.datasets.StanfordCars(root='/Users/junwankim/server/ddpm/', download=False, transform=data_transforms)
-    test_dataset = torchvision.datasets.StanfordCars(root='/Users/junwankim/server/ddpm/', download=False, split='test', transform=data_transforms)
+    train_dataset = torchvision.datasets.StanfordCars(root='./', download=False, transform=data_transforms)
+    test_dataset = torchvision.datasets.StanfordCars(root='./', download=False, split='test', transform=data_transforms)
     
     return torch.utils.data.ConcatDataset([train_dataset, test_dataset]) # Trainig diffusion does not need test datasets
 
@@ -56,16 +56,18 @@ def load_dataset():
 # Forward Diffusion : q(X_{1:T}|X_0) := ∏ᵀₜ₌₁ q(Xₜ |Xₜ₋₁ ), where q(X_t|X_t-1) = N(X_t; \sqrt{1-\beta_t}X_t-1, beta_t⋅ I) 
 # by reparametrization trick above function goes to sqrt(1-beta_t)X_t-1 + sqrt(beta_t) * epsilon_t01 where epsilon_t-1 ~ N(0, I)
 # Forward Process는 임의의 t 스텝까지 한번에 갈 수 있고 이는 논문 수식 4를 참고하면 된다. 
-class ForwardDiffusion:
+class ForwardDiffusion(nn.Module):
     def __init__(self, T=300):
+        super().__init__()
+
         betas = self.linear_beta_schedule(timesteps=T)
         self.T = T
         alphas = 1. - betas     # αₜ := 1 - βₜ
         alphas_cumprod = torch.cumprod(alphas, dim=0) # ᾱₜ := ∏ᵗₖ₌₁ αₖ
-        self.alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.)
-        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod) # √ᾱₜ
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod) # 1-√ᾱₜ
-        
+        self.alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.).cuda()
+        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).cuda() # √ᾱₜ
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod).cuda() # 1-√ᾱₜ
+        # init에서 선언하는 텐서는 lightning에서도 쿠다로 보내야함?
         # self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     
     # Shared Terms
@@ -76,24 +78,12 @@ class ForwardDiffusion:
     def get_index_from_list(self, vals, t, x_shape):
         batch_size = t.shape[0]
         out = vals.gather(-1, t)
-        # return out.reshape(batch_size, *((1,) * (len(x_shape)-1))).to(self.device) # dimension 맟추기용
         return out.reshape(batch_size, *((1,) * (len(x_shape)-1)))
     
-    def get_step_t(self, x_0, t): # t에 따른 noise 계산
-        noise = torch.randn_like(x_0).to(self.device)
-        # noise = torch.randn_like(x_0).to(self.device)
+    def forward(self, x_0, t): # t에 따른 noise 계산
+        noise = torch.randn_like(x_0)
         sqrt_alphas_cumprod_t = self.get_index_from_list(self.sqrt_alphas_cumprod, t, x_0.shape)
         sqrt_one_minus_alphas_cumprod_t = self.get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x_0.shape)    
-        
-        # sqrt_alphas_cumprod_t = sqrt_alphas_cumprod_t.to(self.device)
-        # sqrt_one_minus_alphas_cumprod_t = sqrt_one_minus_alphas_cumprod_t.to(self.device)
-        # x_0 = x_0.to(self.device)
-        # noise = noise.to(self.device)
-        sqrt_alphas_cumprod_t = sqrt_alphas_cumprod_t
-        sqrt_one_minus_alphas_cumprod_t = sqrt_one_minus_alphas_cumprod_t
-        x_0 = x_0
-        noise = noise
-        
         
         # q(xₜ|x₀) = N(xₜ; √ᾱₜx₀, √(1-ᾱₜ)I) 
         #Reparameterization Trick
@@ -166,9 +156,9 @@ class SinusoidalPositionEmbeddings(nn.Module):
     
     def forward(self, t):
         half_dim = self.dim // 2
-        pe = torch.zeros(t.shape[0], self.dim)
+        pe = torch.zeros(t.shape[0], self.dim).cuda()
         embeddings = math.log(10000) / half_dim
-        embeddings = torch.exp(torch.arange(half_dim) * -embeddings)
+        embeddings = torch.exp(torch.arange(half_dim) * -embeddings).cuda()
         embeddings = t.unsqueeze(-1) * embeddings.unsqueeze(0)
         pe[:, 0::2] = embeddings.sin()
         pe[:, 1::2] = embeddings.cos()
@@ -179,7 +169,7 @@ class UNet(pl.LightningModule):
     def __init__(self, T=300, batch_size=128):
         super().__init__()
         in_channels = 3
-        self. T = T
+        self.T = T
         self.batch_size = batch_size
         down_channels = [64, 128, 256, 512, 1024]
         up_channels = [1024, 512, 256, 128, 64]
@@ -214,22 +204,44 @@ class UNet(pl.LightningModule):
         return self.output(x)
     
     def training_step(self, batch):
-        t = torch.randint(0, self.T, (self.batch_size,)).long()
+        t = torch.randint(0, self.T, (self.batch_size,)).cuda().long()
+        train, _ = batch
         
         with torch.no_grad():
-            noised, noise = forward_process.get_step_t(batch, t)
+            noised, noise = self.forward_process(train, t)
             
         noise_pred = self.forward(noised, t)
         loss = F.l1_loss(noise, noise_pred)
         
         self.log('train_loss', loss)
-        self.log('lr', self.lr_schedulers().get_lr()[0], on_step=False, on_epoch=True)
         
         return loss
 
     def configure_optimizers(self):
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return [self.optimizer]
+
+class MyDataModule(pl.LightningDataModule):
+    def __init__(self, data_dir: str = './', batch_size: int = 128):
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+    
+    def prepare_data(self):
+        data_transforms = transforms.Compose([
+            transforms.Resize((64, 64)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Lambda(lambda t: (t * 2) -1) # Tensor가 0~1 사이 값을 가지는데, -1 ~ 1로 확장해줌
+        ])
+    
+        train_dataset = torchvision.datasets.StanfordCars(root='./', download=False, transform=data_transforms)
+        test_dataset = torchvision.datasets.StanfordCars(root='./', download=False, split='test', transform=data_transforms)
+    
+        self.dataset = torch.utils.data.ConcatDataset([train_dataset, test_dataset]) # Trainig diffusion does not need test dataset
+
+    def train_dataloader(self):
+        return DataLoader(self.dataset, batch_size=128, shuffle=True, drop_last=True)
 
     
 if __name__ == '__main__':
@@ -238,7 +250,7 @@ if __name__ == '__main__':
     
     if show_forward:
         # Testing Dataset
-        train_dataset = torchvision.datasets.StanfordCars(root='/Users/junwankim/server/ddpm/', download=False)
+        train_dataset = torchvision.datasets.StanfordCars(root='./', download=False)
         show_raw_images(train_dataset)
         
         # Testing Forward Process
@@ -257,8 +269,6 @@ if __name__ == '__main__':
         sample_output = backward_process(sample_input, torch.Tensor([1]))
         print(sample_output.shape)
     
-    
-    train_loader = DataLoader(train, batch_size=128, shuffle=True, drop_last=True)
     os.makedirs('./results', exist_ok=True)
     wandb.init(project='DDPM', name='DDPM')
     
@@ -268,8 +278,8 @@ if __name__ == '__main__':
     wandb.finish()
     
     wandb_logger = WandbLogger(log_model="all", project='DDPM', name='lightning')
-    trainer = pl.Trainer(accelerator='gpu', logger=wandb_logger, max_epochs=100)
-    trainer.fit(model= model, train_dataloaders=train_loader)
+    trainer = pl.Trainer(accelerator='gpu', logger=wandb_logger, max_epochs=100, callbacks=[ModelSummary()])
+    trainer.fit(model= model, datamodule=MyDataModule())
     
     
     
