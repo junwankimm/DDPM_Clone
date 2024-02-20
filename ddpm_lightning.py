@@ -56,24 +56,18 @@ def load_dataset():
 # Forward Diffusion : q(X_{1:T}|X_0) := ∏ᵀₜ₌₁ q(Xₜ |Xₜ₋₁ ), where q(X_t|X_t-1) = N(X_t; \sqrt{1-\beta_t}X_t-1, beta_t⋅ I) 
 # by reparametrization trick above function goes to sqrt(1-beta_t)X_t-1 + sqrt(beta_t) * epsilon_t01 where epsilon_t-1 ~ N(0, I)
 # Forward Process는 임의의 t 스텝까지 한번에 갈 수 있고 이는 논문 수식 4를 참고하면 된다. 
-class ForwardDiffusion(nn.Module):
+class ForwardDiffusion(pl.LightningModule):
     def __init__(self, T=300):
         super().__init__()
 
-        betas = self.linear_beta_schedule(timesteps=T)
-        self.T = T
+        # 논문 14Page 참고, we chose a linear schedule from β_1=10^−4 to β_T=0.02
+        self.register_buffer("betas", torch.linspace(1e-4, 0.02, T))
+        betas = torch.linspace(1e-4, 0.02, T).to(self.device)
         alphas = 1. - betas     # αₜ := 1 - βₜ
         alphas_cumprod = torch.cumprod(alphas, dim=0) # ᾱₜ := ∏ᵗₖ₌₁ αₖ
-        self.alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.).to(self.device)
-        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).to(self.device) # √ᾱₜ
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod).to(self.device) # 1-√ᾱₜ
-        # init에서 선언하는 텐서는 lightning에서도 쿠다로 보내야함?
-        # self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-    
-    # Shared Terms
-    # 논문 14Page 참고, we chose a linear schedule from β_1=10^−4 to β_T=0.02
-    def linear_beta_schedule(self, timesteps, start=1e-4, end=0.02):
-        return torch.linspace(start, end, timesteps)
+        self.register_buffer("alphas_cumprod_prev", F.pad(alphas_cumprod[:-1], (1, 0), value=1.))
+        self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod)) # √ᾱₜ
+        self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1. - alphas_cumprod)) # 1-√ᾱₜ
     
     def get_index_from_list(self, vals, t, x_shape):
         batch_size = t.shape[0]
@@ -114,7 +108,7 @@ class ForwardDiffusion(nn.Module):
         plt.show()
 
 
-class Block(nn.Module):
+class Block(pl.LightningModule):
     def __init__(self, in_channels, out_channels, time_emb_dim, up=False):
         super().__init__()
         self.time_mlp = nn.Linear(time_emb_dim, out_channels)
@@ -146,7 +140,7 @@ class Block(nn.Module):
         
         return self.transform(h)   
 
-class SinusoidalPositionEmbeddings(nn.Module):
+class SinusoidalPositionEmbeddings(pl.LightningModule):
     # Basic Sinusoidal Position Embeddings
     # f(t)^i = sin(w_k * t) for i = 2k if i = 2k, cos(w_k * t) if i = 2k+1
     # w_k = 1 / 10000^(2k/d) = exp(-2k * log(10000) / d)
@@ -242,7 +236,7 @@ class MyDataModule(pl.LightningDataModule):
         self.dataset = torch.utils.data.ConcatDataset([train_dataset, test_dataset]) # Trainig diffusion does not need test dataset
 
     def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=128, shuffle=True, drop_last=True)
+        return DataLoader(self.dataset, batch_size=128, shuffle=True, drop_last=True, num_workers=5)
 
     
 if __name__ == '__main__':
@@ -279,7 +273,7 @@ if __name__ == '__main__':
     wandb.finish()
     
     wandb_logger = WandbLogger(log_model="all", project='DDPM', name='lightning')
-    trainer = pl.Trainer(accelerator='gpu', logger=wandb_logger, max_epochs=100, callbacks=[ModelSummary()])
+    trainer = pl.Trainer(accelerator='cpu', logger=wandb_logger, max_epochs=100, callbacks=[ModelSummary()])
     trainer.fit(model= model, datamodule=MyDataModule())
     
     
