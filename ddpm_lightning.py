@@ -64,9 +64,9 @@ class ForwardDiffusion(nn.Module):
         self.T = T
         alphas = 1. - betas     # αₜ := 1 - βₜ
         alphas_cumprod = torch.cumprod(alphas, dim=0) # ᾱₜ := ∏ᵗₖ₌₁ αₖ
-        self.alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.).cuda()
-        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).cuda() # √ᾱₜ
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod).cuda() # 1-√ᾱₜ
+        self.alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.).to(self.device)
+        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).to(self.device) # √ᾱₜ
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod).to(self.device) # 1-√ᾱₜ
         # init에서 선언하는 텐서는 lightning에서도 쿠다로 보내야함?
         # self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     
@@ -156,9 +156,9 @@ class SinusoidalPositionEmbeddings(nn.Module):
     
     def forward(self, t):
         half_dim = self.dim // 2
-        pe = torch.zeros(t.shape[0], self.dim).cuda()
+        pe = torch.zeros(t.shape[0], self.dim).to(self.device)
         embeddings = math.log(10000) / half_dim
-        embeddings = torch.exp(torch.arange(half_dim) * -embeddings).cuda()
+        embeddings = torch.exp(torch.arange(half_dim) * -embeddings).to(self.device)
         embeddings = t.unsqueeze(-1) * embeddings.unsqueeze(0)
         pe[:, 0::2] = embeddings.sin()
         pe[:, 1::2] = embeddings.cos()
@@ -204,8 +204,9 @@ class UNet(pl.LightningModule):
         return self.output(x)
     
     def training_step(self, batch):
-        t = torch.randint(0, self.T, (self.batch_size,)).cuda().long()
         train, _ = batch
+        
+        t = torch.randint(0, self.T, (self.batch_size,)).long().to(self.device)
         
         with torch.no_grad():
             noised, noise = self.forward_process(train, t)
